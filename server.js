@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
+const db = require('./models');
+
 
 const app = express();
 
@@ -40,13 +42,38 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ message: 'Something went wrong!' });
 });
+db.sequelize
+  .authenticate()
+  .then(() => {
+    console.log('✅ Database connected successfully');
+    return db.sequelize.sync({ alter: true }); // DEV ONLY
+  })
+  .then(() => {
+    console.log('✅ All tables synced');
+  })
+  .catch((err) => {
+    console.error('❌ Database connection failed:', err);
+  });
+
 
 const PORT = process.env.PORT || 4000;
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Database: ${process.env.DB_NAME}`);
-});
+db.sequelize
+  .authenticate()
+  .then(() => {
+    console.log('✅ Database connected');
+    return db.sequelize.sync({ force: true }); // remove later
+  })
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`📊 Database: ${process.env.DB_NAME}`);
+    });
+  })
+  .catch((err) => {
+    console.error('❌ Unable to connect to database:', err);
+  });
+
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {

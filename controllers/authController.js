@@ -5,13 +5,17 @@ const { validationResult } = require('express-validator');
 const pool = require('../config/database');
 
 // Generate JWT token
-const generateToken = (userId) => {
+const generateToken = (user) => {
   return jwt.sign(
-    { userId },
+    {
+      userId: user.id,
+      role: user.role      // ✅ include role
+    },
     process.env.JWT_SECRET,
-    { expiresIn: '7d' } // Token expires in 7 days
+    { expiresIn: '7d' }
   );
 };
+
 
 // Register new user
 const register = async (req, res) => {
@@ -25,10 +29,14 @@ const register = async (req, res) => {
       });
     }
 
-    const { username, email, password } = req.body;
+    const { username, email, password, role } = req.body;
     const lowerEmail = email.toLowerCase();
 
-    // Check for duplicate email
+    // Validate role
+    const allowedRoles = ["user", "moderator"];
+    const finalRole = allowedRoles.includes(role) ? role : "user";
+
+    // Check duplicate email
     const emailCheck = await pool.query(
       'SELECT id FROM users WHERE email = $1',
       [lowerEmail]
@@ -40,7 +48,7 @@ const register = async (req, res) => {
       });
     }
 
-    // Check for duplicate username
+    // Check duplicate username
     const usernameCheck = await pool.query(
       'SELECT id FROM users WHERE username = $1',
       [username]
@@ -53,27 +61,23 @@ const register = async (req, res) => {
     }
 
     // Hash password
-    const saltRounds = 12;
-    const passwordHash = await bcrypt.hash(password, saltRounds);
+    const passwordHash = await bcrypt.hash(password, 12);
 
-    // Insert new user
+    // ✅ INSERT ROLE
     const result = await pool.query(
-      `INSERT INTO users (username, email, password_hash) 
-       VALUES ($1, $2, $3) 
-       RETURNING id, username, email, created_at`,
-      [username, lowerEmail, passwordHash]
+      `INSERT INTO users (username, email, password_hash, role)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, username, email, role, created_at`,
+      [username, lowerEmail, passwordHash, finalRole]
     );
 
     const user = result.rows[0];
-    const token = generateToken(user.id);
+    const token = generateToken(user);
 
     res.status(201).json({
       success: true,
       message: 'User registered successfully',
-      data: {
-        token,
-        user
-      }
+      data: { token, user }
     });
 
   } catch (error) {
@@ -84,6 +88,7 @@ const register = async (req, res) => {
     });
   }
 };
+
 
 // Login user
 const login = async (req, res) => {
@@ -102,7 +107,7 @@ const login = async (req, res) => {
 
     // Find user by email
     const result = await pool.query(
-      'SELECT id, username, email, password_hash, profile_image, created_at FROM users WHERE email = $1',
+      'SELECT id, username, email, password_hash, role, profile_image, created_at FROM users WHERE email = $1',
       [lowerEmail]
     );
 
@@ -124,7 +129,7 @@ const login = async (req, res) => {
       });
     }
 
-    const token = generateToken(user.id);
+    const token = generateToken(user);
 
     res.json({
       success: true,
@@ -135,6 +140,7 @@ const login = async (req, res) => {
           id: user.id,
           username: user.username,
           email: user.email,
+          role: user.role,
           profile_image: user.profile_image,
           created_at: user.created_at
         }
@@ -156,7 +162,7 @@ const getProfile = async (req, res) => {
     const userId = req.user.userId;
 
     const result = await pool.query(
-      'SELECT id, username, email, profile_image, created_at FROM users WHERE id = $1',
+      'SELECT id, username, email, profile_image, role, created_at FROM users WHERE id = $1',
       [userId]
     );
 
@@ -236,10 +242,37 @@ const logout = (req, res) => {
   });
 };
 
+// controllers/auth.controller.js
+const checkUserExists = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: "Email required" });
+    }
+
+    const lowerEmail = email.toLowerCase();
+
+    const result = await pool.query(
+      "SELECT id FROM users WHERE email = $1",
+      [lowerEmail]
+    );
+
+    return res.status(200).json({
+      exists: result.rows.length > 0,
+    });
+  } catch (error) {
+    console.error("Check user error:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+
 module.exports = {
   register,
   login,
   getProfile,
   updateProfile,
-  logout
+  logout,
+  checkUserExists
 };

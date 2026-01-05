@@ -1,6 +1,8 @@
-// controllers/commentController.js - Fixed with correct table names
+// controllers/commentController.js - With nested comment structure
+
 const { validationResult } = require('express-validator');
 const pool = require('../config/database');
+const { validateCommentToxicity } = require('../utils/toxicityService');
 
 // Get comments for a post (with nested structure)
 const getComments = async (req, res) => {
@@ -22,8 +24,8 @@ const getComments = async (req, res) => {
 
     console.log('✅ Post exists, fetching comments...');
 
-    // Simple query first to debug
-    const simpleResult = await pool.query(`
+    // Fetch ALL comments (both parent and replies) with user info
+    const allCommentsResult = await pool.query(`
       SELECT 
         c.id,
         c.body,
@@ -34,7 +36,6 @@ const getComments = async (req, res) => {
         c.updated_at,
         u.username,
         u.profile_image,
-        0 as level,
         COALESCE(like_counts.like_count, 0) as like_count,
         CASE WHEN user_likes.user_id IS NOT NULL THEN true ELSE false END as is_liked_by_user
       FROM comments c
@@ -49,20 +50,45 @@ const getComments = async (req, res) => {
       ORDER BY c.created_at ASC
     `, [postId, userId]);
 
-    console.log('📝 Comments found:', simpleResult.rows.length);
-    if (simpleResult.rows.length > 0) {
-      console.log('📋 Sample comment:', {
-        id: simpleResult.rows[0].id,
-        body: simpleResult.rows[0].body.substring(0, 50),
-        username: simpleResult.rows[0].username
+    console.log('📝 Total comments found:', allCommentsResult.rows.length);
+
+    // Transform flat list into nested structure
+    const commentsMap = new Map();
+    const rootComments = [];
+
+    // First pass: Create map of all comments
+    allCommentsResult.rows.forEach(comment => {
+      commentsMap.set(comment.id, {
+        ...comment,
+        like_count: parseInt(comment.like_count),
+        replies: [] // Initialize empty replies array
       });
-    }
+    });
+
+    // Second pass: Build nested structure
+    allCommentsResult.rows.forEach(comment => {
+      const commentWithReplies = commentsMap.get(comment.id);
+      
+      if (comment.parent_comment_id === null) {
+        // This is a root comment
+        rootComments.push(commentWithReplies);
+      } else {
+        // This is a reply, add it to parent's replies array
+        const parentComment = commentsMap.get(comment.parent_comment_id);
+        if (parentComment) {
+          parentComment.replies.push(commentWithReplies);
+        }
+      }
+    });
+
+    console.log('✅ Nested structure created:', {
+      rootComments: rootComments.length,
+      totalWithReplies: allCommentsResult.rows.length
+    });
 
     res.json({
       success: true,
-      data: {
-        comments: simpleResult.rows
-      }
+      data: rootComments // Send only root comments (replies are nested inside)
     });
 
   } catch (error) {
@@ -80,10 +106,9 @@ const getComments = async (req, res) => {
 // Create new comment
 const createComment = async (req, res) => {
   try {
-    // Check for validation errors
+    // 1️⃣ Validation check
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      console.log('❌ Validation errors:', errors.array());
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
@@ -95,10 +120,25 @@ const createComment = async (req, res) => {
     const { body, parent_comment_id } = req.body;
     const userId = req.user.userId;
 
-    console.log('📝 Creating comment:', { postId, userId, body: body.substring(0, 50), parent_comment_id });
+    console.log('📝 Creating comment:', body.substring(0, 50));
 
-    // Check if post exists
-    const postCheck = await pool.query('SELECT id FROM posts WHERE id = $1', [postId]);
+    // 2️⃣ Toxicity validation
+    const toxicityResult = await validateCommentToxicity(body);
+
+    if (!toxicityResult.allowed) {
+      return res.status(400).json({
+        success: false,
+        message: 'Comment contains toxic or abusive content',
+        toxicity: toxicityResult.scores
+      });
+    }
+
+    // 3️⃣ Check post exists
+    const postCheck = await pool.query(
+      'SELECT id FROM posts WHERE id = $1',
+      [postId]
+    );
+
     if (postCheck.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -106,57 +146,53 @@ const createComment = async (req, res) => {
       });
     }
 
-    // If parent_comment_id is provided, check if parent comment exists and belongs to the same post
+    // 4️⃣ Parent comment validation
     if (parent_comment_id) {
       const parentCheck = await pool.query(
         'SELECT id, post_id FROM comments WHERE id = $1',
         [parent_comment_id]
       );
 
-      if (parentCheck.rows.length === 0) {
+      if (
+        parentCheck.rows.length === 0 ||
+        parentCheck.rows[0].post_id !== parseInt(postId)
+      ) {
         return res.status(400).json({
           success: false,
-          message: 'Parent comment not found'
-        });
-      }
-
-      if (parentCheck.rows[0].post_id !== parseInt(postId)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Parent comment does not belong to this post'
+          message: 'Invalid parent comment'
         });
       }
     }
 
-    // Create comment
+    // 5️⃣ Insert comment
     const result = await pool.query(`
       INSERT INTO comments (body, post_id, user_id, parent_comment_id)
       VALUES ($1, $2, $3, $4)
-      RETURNING id, body, post_id, user_id, parent_comment_id, created_at, updated_at
+      RETURNING *
     `, [body, postId, userId, parent_comment_id || null]);
 
-    const comment = result.rows[0];
-    console.log('✅ Comment created:', comment.id);
-
-    // Get comment with user info
+    // 6️⃣ Fetch comment with user info
     const commentWithInfo = await pool.query(`
       SELECT 
         c.*,
         u.username,
         u.profile_image,
         0 as like_count,
-        false as is_liked_by_user,
-        0 as level
+        false as is_liked_by_user
       FROM comments c
       LEFT JOIN users u ON c.user_id = u.id
       WHERE c.id = $1
-    `, [comment.id]);
+    `, [result.rows[0].id]);
 
     res.status(201).json({
       success: true,
-      message: 'Comment created successfully',
+      message: parent_comment_id ? 'Reply posted successfully' : 'Comment created successfully',
       data: {
-        comment: commentWithInfo.rows[0]
+        comment: {
+          ...commentWithInfo.rows[0],
+          like_count: 0,
+          replies: [] // Add empty replies array for consistency
+        }
       }
     });
 

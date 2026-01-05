@@ -134,74 +134,108 @@ const getCommunityById = async (req, res) => {
 
 // Create new community
 const createCommunity = async (req, res) => {
+  const client = await pool.connect();
+
   try {
-    // Check for validation errors
+    // 1. Validation errors
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({
         success: false,
-        message: 'Validation failed',
-        errors: errors.array()
+        message: "Validation failed",
+        errors: errors.array(),
       });
     }
 
     const { name } = req.body;
     const userId = req.user.userId;
 
-    // Check if community name already exists
-    const existingCommunity = await pool.query(
-      'SELECT id FROM communities WHERE name = $1',
-      [name]
+    const trimmedName = name.trim();
+
+    // OPTIONAL: role check (uncomment if needed)
+    /*
+    if (req.user.role !== "moderator") {
+      return res.status(403).json({
+        success: false,
+        message: "Only moderators can create communities",
+      });
+    }
+    */
+
+    await client.query("BEGIN");
+
+    // 2. Check if community already exists
+    const existingCommunity = await client.query(
+      "SELECT id FROM communities WHERE LOWER(name) = LOWER($1)",
+      [trimmedName]
     );
 
     if (existingCommunity.rows.length > 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
-        message: 'Community with this name already exists'
+        message: "Community with this name already exists",
       });
     }
 
-    // Create community
-    const result = await pool.query(`
+    // 3. Create community
+    const result = await client.query(
+      `
       INSERT INTO communities (name, created_by)
       VALUES ($1, $2)
       RETURNING id, name, created_by, created_at
-    `, [name, userId]);
+      `,
+      [trimmedName, userId]
+    );
 
     const community = result.rows[0];
 
-    // Automatically join the creator to the community
-    await pool.query(`
+    // 4. Auto-join creator (safe insert)
+    await client.query(
+      `
       INSERT INTO user_communities (user_id, community_id)
       VALUES ($1, $2)
-    `, [userId, community.id]);
+      ON CONFLICT DO NOTHING
+      `,
+      [userId, community.id]
+    );
 
-    // Get community with creator info
-    const communityWithInfo = await pool.query(`
+    // 5. Fetch community with creator info
+    const communityWithInfo = await client.query(
+      `
       SELECT 
         c.*,
-        u.username as created_by_username
+        u.username AS created_by_username
       FROM communities c
       LEFT JOIN users u ON c.created_by = u.id
       WHERE c.id = $1
-    `, [community.id]);
+      `,
+      [community.id]
+    );
 
-    res.status(201).json({
+    await client.query("COMMIT");
+
+    return res.status(201).json({
       success: true,
-      message: 'Community created successfully',
+      message: "Community created successfully",
       data: {
-        community: communityWithInfo.rows[0]
-      }
+        community: communityWithInfo.rows[0],
+      },
     });
 
   } catch (error) {
-    console.error('Create community error:', error);
-    res.status(500).json({
+    await client.query("ROLLBACK");
+    console.error("Create community error:", error);
+
+    return res.status(500).json({
       success: false,
-      message: 'Server error creating community'
+      message: "Server error creating community",
     });
+  } finally {
+    client.release();
   }
 };
+
 
 // Update community
 const updateCommunity = async (req, res) => {

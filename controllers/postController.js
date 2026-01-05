@@ -98,7 +98,7 @@ const createPost = async (req, res) => {
     console.log('Creating post with data:', req.body);
     console.log('File uploaded:', req.file);
     console.log('User from token:', req.user);
-
+    
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       console.log('Validation errors:', errors.array());
@@ -110,7 +110,7 @@ const createPost = async (req, res) => {
     }
 
     const { title, body, community_id } = req.body;
-    const user_id = req.user.id;
+const user_id = req.user.userId;
     const image = req.file ? req.file.filename : null;
 
     // Verify community exists
@@ -156,35 +156,34 @@ const createPost = async (req, res) => {
 const getPostById = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const result = await pool.query(`
       SELECT 
         p.*,
         u.username,
+        u.profile_image,
         c.name as community_name,
-        COUNT(DISTINCT pl.id) as like_count,
-        COUNT(DISTINCT cm.id) as comment_count
+        COUNT(DISTINCT co.id) as comment_count,
+        false as is_liked,
+        0 as like_count
       FROM posts p
       LEFT JOIN users u ON p.user_id = u.id
       LEFT JOIN communities c ON p.community_id = c.id
-      LEFT JOIN post_likes pl ON p.id = pl.post_id
-      LEFT JOIN comments cm ON p.id = cm.post_id
+      LEFT JOIN comments co ON p.id = co.post_id
       WHERE p.id = $1
-      GROUP BY p.id, u.username, c.name
+      GROUP BY p.id, u.username, u.profile_image, c.name
     `, [id]);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Post not found'
       });
     }
-    
+
     res.json({
       success: true,
-      data: {
-        post: result.rows[0]
-      }
+      data: result.rows[0]
     });
   } catch (error) {
     console.error('Error fetching post:', error);
@@ -194,6 +193,8 @@ const getPostById = async (req, res) => {
     });
   }
 };
+
+
 
 const updatePost = async (req, res) => {
   try {
@@ -212,7 +213,7 @@ const updatePost = async (req, res) => {
     // Check if post exists and user owns it
     const existingPost = await pool.query(
       'SELECT * FROM posts WHERE id = $1 AND user_id = $2',
-      [id, req.user.id]
+      [id, req.user.userId]
     );
 
     if (existingPost.rows.length === 0) {
@@ -277,41 +278,61 @@ const updatePost = async (req, res) => {
 const deletePost = async (req, res) => {
   try {
     const { id } = req.params;
+    const { userId, role } = req.user;
 
-    // Check if post exists and user owns it
-    const existingPost = await pool.query(
-      'SELECT * FROM posts WHERE id = $1 AND user_id = $2',
-      [id, req.user.id]
+    // 🔍 Normalize role
+    const normalizedRole = String(role || "").toLowerCase().trim();
+
+    // Fetch post
+    const postResult = await pool.query(
+      'SELECT user_id FROM posts WHERE id = $1',
+      [id]
     );
 
-    if (existingPost.rows.length === 0) {
+    if (postResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Post not found or unauthorized'
+        message: 'Post not found'
+      });
+    }
+
+    const postOwnerId = postResult.rows[0].user_id;
+
+    // Authorization
+    const canDelete =
+      Number(postOwnerId) === Number(userId) ||
+      normalizedRole === 'moderator' ||
+      normalizedRole === 'admin';
+
+    if (!canDelete) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not allowed to delete this post'
       });
     }
 
     await pool.query('DELETE FROM posts WHERE id = $1', [id]);
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Post deleted successfully'
     });
 
   } catch (error) {
     console.error('Error deleting post:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Error deleting post'
     });
   }
 };
 
+
+
 const toggleLike = async (req, res) => {
   try {
     const { id } = req.params;
     const user_id = req.user.id;
-
     // Check if post exists
     const postExists = await pool.query('SELECT id FROM posts WHERE id = $1', [id]);
     if (postExists.rows.length === 0) {

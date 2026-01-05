@@ -16,17 +16,22 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // JWT middleware
+const jwt = require("jsonwebtoken");
+
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(" ")[1];
 
   if (!token) {
-    return res.sendStatus(401);
+    return res.status(401).json({ message: "Token missing" });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user;
+  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(403).json({ message: "Invalid token" });
+    }
+
+    req.user = decoded; // { userId, role }
     next();
   });
 };
@@ -53,7 +58,14 @@ app.post('/api/auth/register', async (req, res) => {
     );
 
     const user = result.rows[0];
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET);
+const token = jwt.sign(
+  {
+    userId: user.id,
+    role: "user" // default role
+  },
+  process.env.JWT_SECRET,
+  { expiresIn: "7d" }
+);
 
     res.status(201).json({ token, user });
   } catch (error) {
@@ -80,7 +92,14 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
 
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET);
+const token = jwt.sign(
+  {
+    userId: user.id,
+    role: user.role 
+  },
+  process.env.JWT_SECRET,
+  { expiresIn: "7d" }
+);
     
     res.json({ 
       token, 

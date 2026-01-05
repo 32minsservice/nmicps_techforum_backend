@@ -6,6 +6,7 @@ const {
   login, 
   getProfile, 
   updateProfile, 
+  checkUserExists,
   logout 
 } = require('../controllers/authController');
 const { authenticateToken } = require('../middleware/auth');
@@ -53,6 +54,7 @@ const updateProfileValidation = [
 router.post('/register', registerValidation, register);
 router.post('/login', loginValidation, login);
 router.get('/profile', authenticateToken, getProfile);
+router.post("/check-user", checkUserExists);
 router.put('/profile', authenticateToken, updateProfileValidation, updateProfile);
 router.post('/logout', logout);
 
